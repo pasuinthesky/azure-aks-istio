@@ -1,0 +1,168 @@
+
+# Register a service principle. 
+# Usage: 
+#   1) For cert-manager to manipulate dna zone;
+#   2) For flux to manage github repo.
+
+ARM_SUBSCRIPTION_ID=$(az account list | jq -r '.[] | select (.isDefault == true).id')
+az ad sp create-for-rbac --role="Contributor" --scopes="/subscriptions/${ARM_SUBSCRIPTION_ID}" | jq
+# Output:
+{
+  "appId": "69*******************************b74",
+  "displayName": "azure-cli-2021-12-23-21-12-48",
+  "name": "69*******************************b74",
+  "password": "z*******************************p",
+  "tenant": "6f4*******************************8ce"
+}
+
+# End of Output
+
+# test it
+
+az login --service-principal -u ${ARM_CLIENT_ID} \
+ -p ${ARM_CLIENT_SECRET} \
+ --tenant ${ARM_TENANT_ID} | jq
+
+az group list -o table # Just to verify
+
+# end of test
+
+# go back to main account
+az login
+
+ARM_CLIENT_ID="69*******************************b74"
+ARM_CLIENT_SECRET="z*******************************p"
+ARM_TENANT_ID=`az ad sp show --id ${ARM_CLIENT_ID}|jq -r .appOwnerTenantId`
+AKV_NAME="*****"
+
+az keyvault secret set -n sp-flux-istio --vault-name ${AKV_NAME} --value ${ARM_CLIENT_ID}
+az keyvault secret set -n sp-flux-istio-secret --vault-name ${AKV_NAME} --value ${ARM_CLIENT_SECRET}
+
+az role assignment create --role "Contributor" --assignee ${ARM_CLIENT_ID} --scope /subscriptions/b7135393-f28b-4a35-b97a-6b68abbd309e/resourceGroups/myResourceGroup/providers/Microsoft.KeyVault/vaults/myVault-3721
+
+# Register a domain name.
+
+terraform init
+terraform plan
+terraform apply -auto-approve
+
+# On domain registrar, point name servers to the name servers of the azure dns zone created.
+
+# Recreate cert-manager to auth with letsencrypt
+terraform destroy -auto-approve target=module.certmgr
+terraform apply -auto-approve
+
+export INGRESS_DOMAIN="azaks.com"
+CERT_DIR=/tmp/certs
+mkdir -p ${CERT_DIR}
+openssl req -x509 -sha256 -nodes -days 365 -newkey rsa:2048 -subj "/O=example Inc./CN=*.${INGRESS_DOMAIN}" -keyout ${CERT_DIR}/ca.key -out ${CERT_DIR}/ca.crt
+openssl req -out ${CERT_DIR}/cert.csr -newkey rsa:2048 -nodes -keyout ${CERT_DIR}/tls.key -subj "/CN=*.${INGRESS_DOMAIN}/O=example organization"
+openssl x509 -req -days 365 -CA ${CERT_DIR}/ca.crt -CAkey ${CERT_DIR}/ca.key -set_serial 0 -in ${CERT_DIR}/cert.csr -out ${CERT_DIR}/tls.crt
+kubectl create -n istio-system secret tls telemetry-gw-cert --key=${CERT_DIR}/tls.key --cert=${CERT_DIR}/tls.crt
+
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: kiali-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 443
+      name: https-kiali
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: telemetry-gw-cert
+    hosts:
+    - "kiali.${INGRESS_DOMAIN}"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: kiali-vs
+  namespace: istio-system
+spec:
+  hosts:
+  - "kiali.${INGRESS_DOMAIN}"
+  gateways:
+  - kiali-gateway
+  http:
+  - route:
+    - destination:
+        host: kiali
+        port:
+          number: 20001
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: kiali
+  namespace: istio-system
+spec:
+  host: kiali
+  trafficPolicy:
+    tls:
+      mode: DISABLE
+---
+EOF
+
+
+
+###########
+# canary
+###########
+
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: public-gateway
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*"
+EOF
+
+kubectl create ns test
+kubectl label namespace test istio-injection=enabled
+
+kubectl apply -k https://github.com/fluxcd/flagger//kustomize/podinfo?ref=main
+kubectl apply -k https://github.com/fluxcd/flagger//kustomize/tester?ref=main
+
+k apply -f podinfo-canary.yaml
+k get vs,destinationrule,deploy,svc,po,canary,hpa -n test
+
+cat <<EOF | k apply -f -
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: podinfo-gateway
+  namespace: test
+spec:
+  selector:
+    istio: ingressgateway # use istio default controller
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+EOF
+
+
+kubectl -n test set image deployment/podinfo \
+podinfod=stefanprodan/podinfo:3.1.2
+
+watch 'kubectl get deployment -n test -o json | jq .items[].spec.template.spec.containers[0].image'
