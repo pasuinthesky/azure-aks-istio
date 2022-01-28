@@ -23,6 +23,7 @@ spec:
           resourceGroupName: ${resource_group_name_dns}
           subscriptionID: ${subscriptionID}
           tenantID: ${tenantID}
+          environment: AzurePublicCloud
 ---
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -49,3 +50,4 @@ spec:
           resourceGroupName: ${resource_group_name_dns}
           subscriptionID: ${subscriptionID}
           tenantID: ${tenantID}
+          environment: AzurePublicCloud
