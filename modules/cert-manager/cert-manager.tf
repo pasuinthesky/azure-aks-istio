@@ -81,7 +81,7 @@ resource "helm_release" "cert_manager" {
   }
   set {
     name  = "extraArgs"
-    value = "{--dns01-recursive-nameservers-only,--dns01-recursive-nameservers=\"${trimsuffix("%{ for i in var.dns_zone.name_servers }${trimsuffix(i, ".")}:53,%{ endfor }", ",")}\"}"
+    value = "{--dns01-recursive-nameservers-only,--dns01-recursive-nameservers=${replace(trimsuffix("%{ for i in var.dns_zone.name_servers }${trimsuffix(i, ".")}:53,%{ endfor }", ","), ",", "\\,")}}"
   }
 }
 
