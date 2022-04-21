@@ -47,6 +47,11 @@ resource "azurerm_kubernetes_cluster" "this" {
   location            = azurerm_resource_group.this.location
   resource_group_name = azurerm_resource_group.this.name
   dns_prefix          = var.worker_node_dns_prefix
+
+  tags = {
+    costCenter = "myOwnPocket"
+  }
+
   default_node_pool {
     name                  = "default"
     vnet_subnet_id        = azurerm_subnet.this.id
